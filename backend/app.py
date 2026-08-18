@@ -12,9 +12,12 @@ import datetime
 import time
 from typing import Optional
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+import yfinance as yf
+
+import store
 from screener import CHECKS, HERE, evaluate, read_watchlist
 
 app = FastAPI(title="Stock Pre-Screen API", version="0.1.0")
@@ -97,3 +100,108 @@ def screen(
         "count": len(results),
         "results": results,
     }
+
+
+# --- Symbol search (look up by company name, not just an exact ticker) --------
+
+def _yahoo_search(q):
+    """yfinance's Search signature has drifted across versions, so try a few kwarg
+    shapes (skipping news where supported) and degrade to an empty list on error."""
+    for kwargs in ({"max_results": 20, "news_count": 0}, {"news_count": 0}, {}):
+        try:
+            return yf.Search(q, **kwargs).quotes or []
+        except TypeError:
+            continue  # this kwarg shape isn't supported here; try the next
+        except Exception:
+            return []
+    return []
+
+
+def _to_result(x):
+    return {
+        "ticker": x.get("symbol"),
+        "name": x.get("shortname") or x.get("longname") or x.get("symbol"),
+        "exchange": x.get("exchDisp") or "",
+        "type": x.get("quoteType") or "",
+    }
+
+
+# Exchanges floated to the top of results — the markets this user actually screens.
+_PREFERRED_EXCHANGES = {
+    "NSE", "Bombay", "BSE", "NASDAQ", "NasdaqGS", "NasdaqGM", "NasdaqCM", "NYSE", "NYSEArca",
+}
+
+
+@app.get("/search")
+def search_symbols(
+    q: str = Query(..., min_length=1, description="Company name or ticker fragment")
+):
+    """Look up matching stocks by name or symbol; US + India listings first.
+
+    Yahoo's fuzzy search often omits the exact NSE/BSE listing when the user types a
+    bare symbol-like word (e.g. "reliance" misses RELIANCE.NS). So when the query looks
+    like a single symbol we also resolve <Q>.NS / <Q>.BO directly and prepend them — a
+    supplementary Search on an exact symbol is fast whether it hits or comes back empty.
+    """
+    q = q.strip()
+    quotes = list(_yahoo_search(q))
+
+    token = q.upper()
+    symbol_like = " " not in q and 1 <= len(token) <= 12 and token.replace(".", "").isalnum()
+    if symbol_like:
+        # Resolve exact listings and prepend them, NSE before BSE (the primary market here).
+        direct = []
+        for suffix in (".NS", ".BO"):
+            if not token.endswith(suffix):
+                direct += _yahoo_search(token + suffix)
+        quotes = direct + quotes
+
+    seen, results = set(), []
+    for x in quotes:
+        if x.get("quoteType") not in ("EQUITY", "ETF"):
+            continue  # skip options, indices, currencies, etc.
+        sym = x.get("symbol")
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        results.append(_to_result(x))
+
+    # Stable sort: preferred exchanges first, existing order (direct hits) kept within.
+    results.sort(key=lambda r: 0 if r["exchange"] in _PREFERRED_EXCHANGES else 1)
+    return {"query": q, "results": results[:12]}
+
+
+# --- Saved watchlist (backend-stored so it's the same on web + phone) ---------
+
+@app.get("/watchlist/tickers")
+def watchlist_tickers():
+    """Just the saved tickers — fast; the app uses it to know what's already added."""
+    return {"tickers": store.list_tickers()}
+
+
+@app.get("/watchlist")
+def watchlist():
+    """Full scorecards for every stock the user has saved."""
+    tickers = store.list_tickers()
+    results = [_to_api(_cached_evaluate(t)) for t in tickers]
+    return {
+        "as_of": datetime.date.today().isoformat(),
+        "count": len(results),
+        "results": results,
+    }
+
+
+@app.post("/watchlist/{ticker}")
+def watchlist_add(ticker: str):
+    """Add a ticker to the saved watchlist; returns the updated list."""
+    t = ticker.strip().upper()
+    if not t:
+        raise HTTPException(status_code=400, detail="Empty ticker")
+    return {"tickers": store.add_ticker(t), "added": t}
+
+
+@app.delete("/watchlist/{ticker}")
+def watchlist_remove(ticker: str):
+    """Remove a ticker from the saved watchlist; returns the updated list."""
+    t = ticker.strip().upper()
+    return {"tickers": store.remove_ticker(t), "removed": t}

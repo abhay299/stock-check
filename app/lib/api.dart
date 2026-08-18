@@ -77,3 +77,91 @@ Future<List<Stock>> fetchScreen({String? tickers}) async {
       .map((e) => Stock.fromJson(e as Map<String, dynamic>))
       .toList();
 }
+
+/// Full scorecard for a single ticker (the Check tab).
+Future<Stock> fetchStock(String ticker) async {
+  final uri = Uri.parse('$apiBase/stock/${Uri.encodeComponent(ticker.trim())}');
+  final res = await http.get(uri).timeout(const Duration(seconds: 90));
+  if (res.statusCode != 200) {
+    throw Exception('Backend returned ${res.statusCode}: ${res.body}');
+  }
+  return Stock.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+}
+
+/// Full scorecards for every saved stock (the My Watchlist tab).
+Future<List<Stock>> fetchWatchlist() async {
+  final res = await http
+      .get(Uri.parse('$apiBase/watchlist'))
+      .timeout(const Duration(seconds: 120));
+  if (res.statusCode != 200) {
+    throw Exception('Backend returned ${res.statusCode}: ${res.body}');
+  }
+  final data = jsonDecode(res.body) as Map<String, dynamic>;
+  return (data['results'] as List)
+      .map((e) => Stock.fromJson(e as Map<String, dynamic>))
+      .toList();
+}
+
+/// Just the saved tickers — used to show the right Add/Remove state on a scorecard.
+Future<Set<String>> fetchWatchlistTickers() async {
+  final res = await http
+      .get(Uri.parse('$apiBase/watchlist/tickers'))
+      .timeout(const Duration(seconds: 30));
+  if (res.statusCode != 200) {
+    throw Exception('Backend returned ${res.statusCode}: ${res.body}');
+  }
+  final data = jsonDecode(res.body) as Map<String, dynamic>;
+  return (data['tickers'] as List).map((e) => e as String).toSet();
+}
+
+/// Adds a ticker; returns the updated saved list.
+Future<List<String>> addToWatchlist(String ticker) async {
+  final res = await http
+      .post(Uri.parse('$apiBase/watchlist/${Uri.encodeComponent(ticker.trim())}'))
+      .timeout(const Duration(seconds: 30));
+  if (res.statusCode != 200) {
+    throw Exception('Backend returned ${res.statusCode}: ${res.body}');
+  }
+  final data = jsonDecode(res.body) as Map<String, dynamic>;
+  return (data['tickers'] as List).map((e) => e as String).toList();
+}
+
+/// Removes a ticker; returns the updated saved list.
+Future<List<String>> removeFromWatchlist(String ticker) async {
+  final res = await http
+      .delete(Uri.parse('$apiBase/watchlist/${Uri.encodeComponent(ticker.trim())}'))
+      .timeout(const Duration(seconds: 30));
+  if (res.statusCode != 200) {
+    throw Exception('Backend returned ${res.statusCode}: ${res.body}');
+  }
+  final data = jsonDecode(res.body) as Map<String, dynamic>;
+  return (data['tickers'] as List).map((e) => e as String).toList();
+}
+
+/// One result from GET /search — a candidate stock the user can pick to check.
+class SymbolMatch {
+  final String ticker;
+  final String name;
+  final String exchange;
+  final String type;
+
+  SymbolMatch.fromJson(Map<String, dynamic> j)
+      : ticker = j['ticker'] as String,
+        name = (j['name'] ?? '') as String,
+        exchange = (j['exchange'] ?? '') as String,
+        type = (j['type'] ?? '') as String;
+}
+
+/// Looks up stocks by company name or ticker fragment (the Check tab search box).
+Future<List<SymbolMatch>> searchSymbols(String query) async {
+  final uri =
+      Uri.parse('$apiBase/search').replace(queryParameters: {'q': query.trim()});
+  final res = await http.get(uri).timeout(const Duration(seconds: 30));
+  if (res.statusCode != 200) {
+    throw Exception('Backend returned ${res.statusCode}: ${res.body}');
+  }
+  final data = jsonDecode(res.body) as Map<String, dynamic>;
+  return (data['results'] as List)
+      .map((e) => SymbolMatch.fromJson(e as Map<String, dynamic>))
+      .toList();
+}

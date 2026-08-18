@@ -63,12 +63,27 @@ On web the app calls the backend at `http://127.0.0.1:8000`; on the Android emul
 uses `http://10.0.2.2:8000`. Point it at a deployed backend with
 `--dart-define=API_BASE=https://your-host`.
 
+## Deploy the backend (Render)
+
+A `render.yaml` blueprint provisions the web service + a free Postgres. The watchlist
+persists in Postgres because Render's free disk is wiped on restart; `store.py` uses
+Postgres automatically when `DATABASE_URL` is set, and SQLite locally — no code change.
+
+1. Render → **New → Blueprint** → connect this repo → **Apply**. Render builds `backend/`
+   and links the database.
+2. Grab the service URL (e.g. `https://stock-check-api.onrender.com`).
+3. Point the app at it:
+   `flutter run --dart-define=API_BASE=https://stock-check-api.onrender.com`
+
+Free instances sleep after ~15 min idle, so the first request after a nap takes ~30–60s
+to wake — normal for the free tier.
+
 ## Status / roadmap
 
-- ✅ Backend API + Flutter web app
-- ⏳ Android build (needs Android `cmdline-tools` + accepted SDK licenses)
-- Ideas: SQLite cache + scheduled refresh; higher-quality data per market (SEC EDGAR for
-  US, Screener.in for India); deploy backend (Cloud Run/Railway) + web (static host).
+- ✅ Backend API, Flutter web app, symbol search, backend-synced watchlist
+- ⏳ Deploy to Render + Android build
+- Ideas: scheduled data refresh; higher-quality data per market (SEC EDGAR for US,
+  Screener.in for India); §3 valuation checks.
 
 ## Data caveats
 

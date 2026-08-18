@@ -1,0 +1,16 @@
+# Your watchlist — one ticker per line. Lines starting with # are ignored.
+#   US stocks:   plain symbol      -> AAPL, MSFT, NVDA
+#   India (NSE): add .NS           -> TCS.NS, RELIANCE.NS
+#   India (BSE): add .BO           -> TCS.BO
+#
+# The list below is just a demo mix (US + India, incl. a bank to show N/A handling).
+# Replace it with the stocks you actually track.
+
+AAPL
+MSFT
+NVDA
+GOOGL
+TCS.NS
+RELIANCE.NS
+HINDUNILVR.NS
+HDFCBANK.NS

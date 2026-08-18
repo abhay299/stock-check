@@ -8,6 +8,9 @@
 # Generated screener reports
 reports/
 
+# Local data (personal watchlist DB)
+*.db
+
 # OS
 .DS_Store
 

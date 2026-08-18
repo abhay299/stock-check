@@ -107,11 +107,24 @@ def evaluate(ticker):
     bal = _safe(lambda: t.balance_sheet)
     cf = _safe(lambda: t.cashflow)
 
-    name = info.get("shortName") or info.get("longName") or ticker
+    name = info.get("shortName") or info.get("longName") or ""
+    if not name:
+        # .info is frequently rate-limited from cloud IPs (works locally, blocked on
+        # Render), so fall back to Search, which returns the company name reliably.
+        try:
+            for q in yf.Search(ticker).quotes:
+                if str(q.get("symbol", "")).upper() == ticker.upper():
+                    name = q.get("shortname") or q.get("longname") or ""
+                    break
+        except Exception:
+            pass
+    name = name or ticker
     sector = info.get("sector") or ""
     industry = info.get("industry") or ""
     is_fin = sector in config.FINANCIAL_SECTORS or "Bank" in industry or "Insurance" in industry
     currency = info.get("financialCurrency") or info.get("currency") or ""
+    if not currency and ticker.upper().endswith((".NS", ".BO")):
+        currency = "INR"
 
     th = config.THRESHOLDS
     m = {}
@@ -132,11 +145,15 @@ def evaluate(ticker):
     ebit = _latest(inc, ["EBIT", "Operating Income", "Operating Income Or Loss"])
     total_assets = _latest(bal, ["Total Assets"])
     curr_liab = _latest(bal, ["Current Liabilities", "Total Current Liabilities"])
+    # Banks/financials don't report a current-liabilities split, so a missing value is a
+    # reliable structural signal of a financial even when .info's sector is unavailable
+    # (e.g. from Render). ROCE and Debt/Equity are meaningless for financials → N/A.
+    financial = is_fin or curr_liab is None
     roce = None
     if None not in (ebit, total_assets, curr_liab) and (total_assets - curr_liab) > 0:
         roce = ebit / (total_assets - curr_liab)
     put("roce", roce, roce is not None and roce >= th["roce_min"],
-        na=is_fin, note="n/a (financial)" if is_fin else "")
+        na=financial, note="n/a (financial)" if financial else "")
 
     total_debt = _latest(bal, ["Total Debt"])
     de = None
@@ -145,7 +162,7 @@ def evaluate(ticker):
     elif info.get("debtToEquity") is not None:
         de = info["debtToEquity"] / 100.0  # Yahoo reports this as a percentage
     put("de", de, de is not None and de <= th["debt_to_equity_max"],
-        na=is_fin, note="n/a (financial)" if is_fin else "")
+        na=financial, note="n/a (financial)" if financial else "")
 
     ocf = _latest(cf, ["Operating Cash Flow", "Total Cash From Operating Activities",
                        "Cash Flow From Continuing Operating Activities"])

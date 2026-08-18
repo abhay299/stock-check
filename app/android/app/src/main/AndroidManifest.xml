@@ -1,6 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Required so release builds can reach the backend API over the network.
+         (Flutter injects this automatically for debug/profile, but not release.) -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+
     <application
-        android:label="stock_screener"
+        android:label="Stock Pre-Screen"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

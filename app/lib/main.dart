@@ -35,6 +35,8 @@ class _HomePageState extends State<HomePage> {
   Set<String> _saved = {};
   // Bumped whenever the saved list changes, to force My Watchlist to refetch.
   Key _watchlistKey = UniqueKey();
+  // Bumped when filter thresholds change, so the tabs re-score with the new bars.
+  int _settingsVersion = 0;
 
   @override
   void initState() {
@@ -71,14 +73,41 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _openSettings() async {
+    final changed = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(builder: (_) => const SettingsPage()),
+    );
+    if (changed == true && mounted) {
+      // Re-score everything with the new thresholds.
+      setState(() {
+        _settingsVersion++;
+        _watchlistKey = UniqueKey();
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final pages = [
-      CheckTab(saved: _saved, onAdd: _add, onRemove: _remove),
+      CheckTab(
+        saved: _saved,
+        onAdd: _add,
+        onRemove: _remove,
+        settingsVersion: _settingsVersion,
+      ),
       MyWatchlistTab(key: _watchlistKey, onRemove: _remove),
     ];
     return Scaffold(
-      appBar: AppBar(title: const Text('Stock Pre-Screen')),
+      appBar: AppBar(
+        title: const Text('Stock Pre-Screen'),
+        actions: [
+          IconButton(
+            tooltip: 'Filter settings',
+            icon: const Icon(Icons.tune),
+            onPressed: _openSettings,
+          ),
+        ],
+      ),
       body: pages[_tab],
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tab,
@@ -110,11 +139,13 @@ class CheckTab extends StatefulWidget {
   final Set<String> saved;
   final Future<void> Function(String) onAdd;
   final Future<void> Function(String) onRemove;
+  final int settingsVersion;
   const CheckTab({
     super.key,
     required this.saved,
     required this.onAdd,
     required this.onRemove,
+    required this.settingsVersion,
   });
 
   @override
@@ -131,6 +162,15 @@ class _CheckTabState extends State<CheckTab> {
   void dispose() {
     _ctrl.dispose();
     super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(CheckTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Thresholds changed → re-score the stock currently on screen with the new bars.
+    if (widget.settingsVersion != oldWidget.settingsVersion && _selectedTicker != null) {
+      _stockFuture = fetchStock(_selectedTicker!);
+    }
   }
 
   void _search() {
@@ -720,6 +760,180 @@ class _ErrorView extends StatelessWidget {
               label: const Text('Retry'),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+// ============================== Settings ==============================
+
+/// Edit the filter thresholds. Percent bars are shown as whole numbers (20 = 20%),
+/// the debt ratio as-is. Saving persists them on the backend (synced everywhere).
+class SettingsPage extends StatefulWidget {
+  const SettingsPage({super.key});
+
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<SettingsPage> {
+  // Display order of the editable bars.
+  static const _order = [
+    'roce_min', 'roe_min', 'debt_to_equity_max',
+    'sales_growth_min', 'profit_growth_min', 'eps_growth_min',
+  ];
+
+  Thresholds? _t;
+  final _controllers = <String, TextEditingController>{};
+  bool _loading = true;
+  bool _saving = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    for (final c in _controllers.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    try {
+      final t = await fetchSettings();
+      _controllers.clear();
+      for (final k in _order) {
+        if (t.editable.containsKey(k)) {
+          _controllers[k] =
+              TextEditingController(text: _display(t, k, t.values[k] ?? 0));
+        }
+      }
+      if (mounted) setState(() { _t = t; _loading = false; });
+    } catch (e) {
+      if (mounted) setState(() { _error = '$e'; _loading = false; });
+    }
+  }
+
+  // Percent bars display as whole numbers; the ratio as a decimal.
+  String _display(Thresholds t, String key, double v) =>
+      t.editable[key]?.unit == 'percent'
+          ? (v * 100).toStringAsFixed(0)
+          : v.toStringAsFixed(2);
+
+  void _resetToDefaults() {
+    final t = _t;
+    if (t == null) return;
+    setState(() {
+      for (final k in _controllers.keys) {
+        _controllers[k]!.text = _display(t, k, t.defaults[k] ?? 0);
+      }
+    });
+  }
+
+  Future<void> _save() async {
+    final t = _t!;
+    final values = <String, double>{};
+    for (final k in _controllers.keys) {
+      final raw = double.tryParse(_controllers[k]!.text.trim());
+      if (raw == null || raw < 0) {
+        _snack('Enter a valid number for ${t.editable[k]!.label}');
+        return;
+      }
+      values[k] = t.editable[k]!.unit == 'percent' ? raw / 100.0 : raw;
+    }
+    setState(() => _saving = true);
+    try {
+      await updateSettings(values);
+      if (mounted) Navigator.pop(context, true); // signal "changed" to HomePage
+    } catch (e) {
+      if (mounted) {
+        setState(() => _saving = false);
+        _snack('Save failed: $e');
+      }
+    }
+  }
+
+  void _snack(String msg) =>
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Filter settings'),
+        actions: [
+          if (!_loading && _error == null)
+            TextButton(onPressed: _resetToDefaults, child: const Text('Reset')),
+        ],
+      ),
+      body: _buildBody(),
+    );
+  }
+
+  Widget _buildBody() {
+    if (_loading) return const Center(child: CircularProgressIndicator());
+    if (_error != null) {
+      return _ErrorView(
+        message: _error!,
+        onRetry: () {
+          setState(() {
+            _loading = true;
+            _error = null;
+          });
+          _load();
+        },
+      );
+    }
+    final t = _t!;
+    return ListView(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      children: [
+        const Padding(
+          padding: EdgeInsets.fromLTRB(16, 4, 16, 12),
+          child: Text(
+            'Loosen or tighten the bars to your tolerance. Changes apply everywhere '
+            'and re-score your lists instantly.',
+            style: TextStyle(fontSize: 13),
+          ),
+        ),
+        for (final k in _controllers.keys) _field(t, k),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+          child: FilledButton.icon(
+            onPressed: _saving ? null : _save,
+            icon: _saving
+                ? const SizedBox(
+                    width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.save),
+            label: const Text('Save'),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _field(Thresholds t, String key) {
+    final meta = t.editable[key]!;
+    final percent = meta.unit == 'percent';
+    final def = t.defaults[key] ?? 0;
+    final defStr =
+        percent ? '${(def * 100).toStringAsFixed(0)}%' : def.toStringAsFixed(2);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: TextField(
+        controller: _controllers[key],
+        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+        decoration: InputDecoration(
+          labelText: meta.label,
+          border: const OutlineInputBorder(),
+          suffixText: percent ? '%' : '',
+          helperText: 'default $defStr',
         ),
       ),
     );

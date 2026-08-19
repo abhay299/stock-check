@@ -97,7 +97,9 @@ def _cagr(series, max_years):
     return (end / begin) ** (1.0 / years) - 1.0, years
 
 
-def evaluate(ticker):
+def fetch(ticker):
+    """Pull everything threshold-independent from Yahoo (the slow, cacheable part):
+    the statement frames plus a resolved name/sector/currency."""
     t = yf.Ticker(ticker)
     try:
         info = t.info or {}
@@ -126,7 +128,21 @@ def evaluate(ticker):
     if not currency and ticker.upper().endswith((".NS", ".BO")):
         currency = "INR"
 
-    th = config.THRESHOLDS
+    return {"info": info, "inc": inc, "bal": bal, "cf": cf,
+            "name": name, "sector": sector, "is_fin": is_fin, "currency": currency}
+
+
+def evaluate(ticker, thresholds=None, data=None):
+    """Score a ticker against `thresholds` (defaults to config.THRESHOLDS). Pass `data`
+    from fetch() to reuse a cached fetch and only re-apply the thresholds — that is what
+    lets a threshold change re-bucket instantly, without re-hitting Yahoo."""
+    th = thresholds or config.THRESHOLDS
+    if data is None:
+        data = fetch(ticker)
+    info, inc, bal, cf = data["info"], data["inc"], data["bal"], data["cf"]
+    name, sector, currency, is_fin = (
+        data["name"], data["sector"], data["currency"], data["is_fin"])
+
     m = {}
 
     def put(key, value, ok, na=False, note=""):

@@ -165,3 +165,53 @@ Future<List<SymbolMatch>> searchSymbols(String query) async {
       .map((e) => SymbolMatch.fromJson(e as Map<String, dynamic>))
       .toList();
 }
+
+/// Metadata for one editable threshold (from GET /settings).
+class ThresholdMeta {
+  final String label;
+  final String unit; // "percent" | "ratio"
+  ThresholdMeta.fromJson(Map<String, dynamic> j)
+      : label = j['label'] as String,
+        unit = j['unit'] as String;
+}
+
+/// The filter thresholds: current values, defaults, and which keys are editable.
+class Thresholds {
+  final Map<String, double> values;
+  final Map<String, double> defaults;
+  final Map<String, ThresholdMeta> editable;
+  Thresholds.fromJson(Map<String, dynamic> j)
+      : values = _numMap(j['thresholds']),
+        defaults = _numMap(j['defaults']),
+        editable = (j['editable'] as Map<String, dynamic>).map((k, v) =>
+            MapEntry(k, ThresholdMeta.fromJson(v as Map<String, dynamic>)));
+}
+
+Map<String, double> _numMap(dynamic m) =>
+    (m as Map<String, dynamic>).map((k, v) => MapEntry(k, (v as num).toDouble()));
+
+/// Current filter settings (GET /settings).
+Future<Thresholds> fetchSettings() async {
+  final res = await http
+      .get(Uri.parse('$apiBase/settings'))
+      .timeout(const Duration(seconds: 30));
+  if (res.statusCode != 200) {
+    throw Exception('Backend returned ${res.statusCode}: ${res.body}');
+  }
+  return Thresholds.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+}
+
+/// Save edited thresholds (PUT /settings); returns the updated settings.
+Future<Thresholds> updateSettings(Map<String, double> values) async {
+  final res = await http
+      .put(
+        Uri.parse('$apiBase/settings'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'thresholds': values}),
+      )
+      .timeout(const Duration(seconds: 30));
+  if (res.statusCode != 200) {
+    throw Exception('Backend returned ${res.statusCode}: ${res.body}');
+  }
+  return Thresholds.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+}

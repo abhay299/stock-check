@@ -1,0 +1,47 @@
+name: Deploy web to GitHub Pages
+
+# Auto-deploys the Flutter web app whenever the app changes, plus a manual trigger.
+on:
+  push:
+    branches: [master]
+    paths: ["app/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never run two Pages deploys at once.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: Build web (baked with the deployed backend URL)
+        working-directory: app
+        run: |
+          flutter pub get
+          flutter build web --release \
+            --base-href "/stock-check/" \
+            --dart-define=API_BASE=https://stock-check-api.onrender.com
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: app/build/web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

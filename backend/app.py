@@ -9,16 +9,18 @@ Run (dev):   uvicorn app:app --reload --port 8000
 Then open:   http://127.0.0.1:8000/docs   (interactive API explorer)
 """
 import datetime
+import json
 import time
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 import yfinance as yf
 
+import config
 import store
-from screener import CHECKS, HERE, evaluate, read_watchlist
+from screener import CHECKS, HERE, evaluate, fetch, read_watchlist
 
 app = FastAPI(title="Stock Pre-Screen API", version="0.1.0")
 
@@ -31,20 +33,37 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- tiny in-memory cache: fundamentals barely move, so don't re-hit Yahoo per request.
-# (Phase 3 swaps this for SQLite + a scheduled refresh.)
-_CACHE = {}                 # ticker -> (fetched_at, result)
+# --- in-memory cache of the SLOW part only (the Yahoo fetch), which is
+# threshold-independent. Thresholds are applied per request, so changing a bar
+# re-buckets everything instantly without re-fetching.
+_CACHE = {}                 # ticker -> (fetched_at, data)
 _TTL_SECONDS = 6 * 3600
 
 
-def _cached_evaluate(ticker):
+def _cached_fetch(ticker):
     now = time.time()
     hit = _CACHE.get(ticker)
     if hit and now - hit[0] < _TTL_SECONDS:
         return hit[1]
-    result = evaluate(ticker)
-    _CACHE[ticker] = (now, result)
-    return result
+    data = fetch(ticker)
+    _CACHE[ticker] = (now, data)
+    return data
+
+
+def current_thresholds():
+    """Active thresholds: stored overrides merged over the config defaults."""
+    raw = store.get_setting("thresholds")
+    if raw:
+        try:
+            return {**config.THRESHOLDS, **json.loads(raw)}
+        except Exception:
+            pass
+    return dict(config.THRESHOLDS)
+
+
+def _scorecard(ticker, thresholds):
+    """Score one ticker from a cached fetch + the given thresholds."""
+    return _to_api(evaluate(ticker, thresholds, data=_cached_fetch(ticker)))
 
 
 def _to_api(r):
@@ -79,7 +98,7 @@ def health():
 @app.get("/stock/{ticker}")
 def stock(ticker: str):
     """Full scorecard for a single ticker."""
-    return _to_api(_cached_evaluate(ticker.upper()))
+    return _scorecard(ticker.upper(), current_thresholds())
 
 
 @app.get("/screen")
@@ -94,7 +113,8 @@ def screen(
         symbols = [t.strip().upper() for t in tickers.split(",") if t.strip()]
     else:
         symbols = read_watchlist(HERE / "watchlist.txt")
-    results = [_to_api(_cached_evaluate(s)) for s in symbols]
+    th = current_thresholds()
+    results = [_scorecard(s, th) for s in symbols]
     return {
         "as_of": datetime.date.today().isoformat(),
         "count": len(results),
@@ -183,7 +203,8 @@ def watchlist_tickers():
 def watchlist():
     """Full scorecards for every stock the user has saved."""
     tickers = store.list_tickers()
-    results = [_to_api(_cached_evaluate(t)) for t in tickers]
+    th = current_thresholds()
+    results = [_scorecard(t, th) for t in tickers]
     return {
         "as_of": datetime.date.today().isoformat(),
         "count": len(results),
@@ -205,3 +226,40 @@ def watchlist_remove(ticker: str):
     """Remove a ticker from the saved watchlist; returns the updated list."""
     t = ticker.strip().upper()
     return {"tickers": store.remove_ticker(t), "removed": t}
+
+
+# --- Filter thresholds (dynamic; stored in the DB, applied per request) --------
+
+# Only these threshold keys are user-editable, with metadata for the Settings UI.
+# Positive-cash-flow and the growth window stay fixed on purpose.
+_EDITABLE = {
+    "roce_min": {"label": "ROCE min", "unit": "percent"},
+    "roe_min": {"label": "ROE min", "unit": "percent"},
+    "debt_to_equity_max": {"label": "Debt / Equity max", "unit": "ratio"},
+    "sales_growth_min": {"label": "Sales growth min", "unit": "percent"},
+    "profit_growth_min": {"label": "Profit growth min", "unit": "percent"},
+    "eps_growth_min": {"label": "EPS growth min", "unit": "percent"},
+}
+
+
+@app.get("/settings")
+def get_settings():
+    """Current thresholds, the defaults, and which keys the app may edit."""
+    return {
+        "thresholds": current_thresholds(),
+        "defaults": dict(config.THRESHOLDS),
+        "editable": _EDITABLE,
+    }
+
+
+@app.put("/settings")
+def put_settings(payload: dict = Body(...)):
+    """Update editable thresholds. Unknown keys and non-numeric/negative values are
+    ignored, and the result is merged over the defaults so the stored set stays complete."""
+    incoming = payload.get("thresholds", payload) or {}
+    merged = current_thresholds()
+    for k, v in incoming.items():
+        if k in _EDITABLE and isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0:
+            merged[k] = float(v)
+    store.set_setting("thresholds", json.dumps(merged))
+    return {"thresholds": merged, "defaults": dict(config.THRESHOLDS), "editable": _EDITABLE}

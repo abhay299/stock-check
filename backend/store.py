@@ -25,6 +25,14 @@ if _DATABASE_URL:
     )
     _INSERT = "INSERT INTO watchlist (ticker) VALUES (%s) ON CONFLICT (ticker) DO NOTHING"
     _DELETE = "DELETE FROM watchlist WHERE ticker = %s"
+    _CREATE_SETTINGS = (
+        "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    _UPSERT_SETTING = (
+        "INSERT INTO settings (key, value) VALUES (%s, %s) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+    )
+    _GET_SETTING = "SELECT value FROM settings WHERE key = %s"
 
     def _connect():
         return psycopg.connect(_PG_URL)
@@ -43,6 +51,11 @@ else:
     )
     _INSERT = "INSERT OR IGNORE INTO watchlist (ticker) VALUES (?)"
     _DELETE = "DELETE FROM watchlist WHERE ticker = ?"
+    _CREATE_SETTINGS = (
+        "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    _UPSERT_SETTING = "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)"
+    _GET_SETTING = "SELECT value FROM settings WHERE key = ?"
 
     def _connect():
         return sqlite3.connect(_DB_PATH)
@@ -54,7 +67,8 @@ _SELECT = "SELECT ticker FROM watchlist ORDER BY id"
 def _run(query, params=None, fetch=False):
     conn = _connect()
     try:
-        conn.execute(_CREATE)  # idempotent; ensures the table exists
+        conn.execute(_CREATE)  # idempotent; ensure both tables exist
+        conn.execute(_CREATE_SETTINGS)
         cur = conn.execute(query, params) if params else conn.execute(query)
         rows = cur.fetchall() if fetch else None
         conn.commit()
@@ -77,3 +91,13 @@ def add_ticker(ticker):
 def remove_ticker(ticker):
     _run(_DELETE, (ticker,))
     return list_tickers()
+
+
+def get_setting(key):
+    """Return the stored value for `key`, or None if unset."""
+    rows = _run(_GET_SETTING, (key,), fetch=True)
+    return rows[0][0] if rows else None
+
+
+def set_setting(key, value):
+    _run(_UPSERT_SETTING, (key, value))
